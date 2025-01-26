@@ -140,6 +140,7 @@ extern int h_errno;
 #define MAX_PING_DATA (MAX_IP_PACKET - SIZE_IP_HDR - SIZE_ICMP_HDR)
 
 #define MAX_GENERATE 131070 /* maximum number of hosts that -g can generate */
+#define MAX_TARGET_NAME_LEN 255 /* maximum target name length read from file */
 
 /* sized so as to be like traditional ping */
 #define DEFAULT_PING_DATA_SIZE 56
@@ -1167,8 +1168,10 @@ int main(int argc, char **argv)
     }
     else if (filename) {
         FILE *ping_file;
-        char line[132];
-        char host[132];
+        char line[MAX_TARGET_NAME_LEN + 1];
+        char host[MAX_TARGET_NAME_LEN + 1];
+        char scratch[MAX_TARGET_NAME_LEN + 1];
+        int skip = 0;
 
         if (strcmp(filename, "-") == 0)
             ping_file = fdopen(0, "r");
@@ -1178,12 +1181,59 @@ int main(int argc, char **argv)
         if (!ping_file)
             errno_crash_and_burn("fopen");
 
+        /*
+         * Read the first word of every non-comment line, skip everything else.
+         * (Empty and blank lines are ignored.  Lines where the first non-blank
+         * character is a '#' are interpreted as comments and ignored.)
+        */
         while (fgets(line, sizeof(line), ping_file)) {
             if (sscanf(line, "%s", host) != 1)
                 continue;
 
-            if ((!*host) || (host[0] == '#')) /* magic to avoid comments */
+            if ((!*host) || (host[0] == '#')) { /* magic to avoid comments */
+                skip = 1;
                 continue;
+            }
+
+            /*
+             * Handle non-empty input lines longer than the line buffer.
+             * We have found at least the start of a word if we get here.
+             */
+            if (!strchr(line, '\n') && (strlen(line) == sizeof(line) - 1)) {
+                char discard1[MAX_TARGET_NAME_LEN + 1];
+                char discard2[MAX_TARGET_NAME_LEN + 1];
+                if (sscanf(line, "%s%s", discard1, discard2) == 2) {
+                    skip = 1; /* a second word starts in this part */
+                }
+                if (isspace(line[sizeof(line) - 2])) {
+                    skip = 1; /* the first word ends in this part */
+                }
+            }
+            /* read remainder of this input line */
+            while (!strchr(line, '\n') && fgets(line, sizeof(line), ping_file)) {
+                if (skip)
+                    continue; /* skip rest of data in this input line */
+                if (isspace(line[0])) {
+                    skip = 1; /* the first word ended in previous part */
+                    continue;
+                }
+                if (sscanf(line, "%s", scratch) != 1) {
+                    skip = 1; /* empty or blank part of line, skip the rest */
+                    continue;
+                }
+                if ((!*scratch) || (scratch[0] == '#')) {
+                    skip = 1; /* empty, or comment; skip the rest */
+                    continue;
+                }
+                if (sizeof(host) - strlen(host) < strlen(scratch) + 1) {
+                    fprintf(stderr, "%s: target name too long\n", prog);
+                    exit(1);
+                }
+                /* append remainder of word started in previous line part */
+                strncat(host, scratch, sizeof(host) - strlen(host) - 1);
+                skip = 1; /* first word is complete, skip the rest */
+            }
+            skip = 0; /* complete input line has been read */
 
             add_name(host);
         }
